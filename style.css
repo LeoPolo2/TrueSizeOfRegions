@@ -1,0 +1,33 @@
+body {
+    padding: 0;
+    margin: 0;
+}
+
+html, body, #map {
+    height: 100%;
+    width: 100%;
+    background-color: #f0f0f0; /* A light grey background for uncovered areas */
+}
+#controls {
+    position: absolute;
+    top: 10px;
+    left: 50px;
+    z-index: 1000; /* Ensure it's on top of the map */
+    background: white;
+    padding: 10px;
+    border-radius: 5px;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.65);
+}
+
+#search-box {
+    width: 250px;
+}
+
+#search-results div {
+    cursor: pointer;
+    padding: 5px;
+}
+
+#search-results div:hover {
+    background-color: #f4f4f4;
+}
