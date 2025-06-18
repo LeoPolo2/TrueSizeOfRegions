@@ -14,124 +14,112 @@ const searchResults = document.getElementById('search-results');
 let searchableData = []; // This will hold { name, type, geojsonFeature }
 let geojsonLayers = {}; // To store the rendered layers
 let statesCache = new Map(); // Cache for loaded states
-let statesIndex = []; // Lightweight index of all states
 
-// Load countries immediately, states on demand
-Promise.all([
-    fetch('countries.geojson').then(res => res.json()),
-    loadStatesIndex() // Load just the index, not the full geometries
-]).then(([countries, statesIdx]) => {
-    // Process countries
-    geojsonLayers.countries = L.geoJSON(countries, {
-        style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
-    }).addTo(map);
+// Load countries and prepare states data
+loadInitialData();
 
-    countries.features.forEach(feature => {
-        searchableData.push({
-            name: feature.properties.ADMIN,
-            type: 'Country',
-            geojsonFeature: feature,
-            loadType: 'immediate'
+async function loadInitialData() {
+    try {
+        // Load countries from your existing file
+        const countries = await fetch('countries.geojson').then(res => {
+            if (!res.ok) throw new Error('Countries file not found');
+            return res.json();
         });
-    });
 
-    // Add states to searchable data (but don't load geometries yet)
-    statesIndex = statesIdx;
-    statesIdx.forEach(stateInfo => {
-        searchableData.push({
-            name: stateInfo.name,
-            type: 'State',
-            stateId: stateInfo.id,
-            loadType: 'ondemand'
+        // Process countries
+        geojsonLayers.countries = L.geoJSON(countries, {
+            style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
+        }).addTo(map);
+
+        countries.features.forEach(feature => {
+            searchableData.push({
+                name: feature.properties.ADMIN,
+                type: 'Country',
+                geojsonFeature: feature,
+                loadType: 'immediate'
+            });
         });
-    });
-});
 
-// Create a lightweight states index (you'd generate this once from your big file)
-async function loadStatesIndex() {
-    // This would be a small JSON file with just names and IDs
-    // Example structure: [{ id: "US-CA", name: "California" }, ...]
-    try {
-        const response = await fetch('states_index.json');
-        return response.json();
-    } catch (error) {
-        console.log('States index not found, using API fallback');
-        return getStatesFromAPI();
-    }
-}
-
-// Fallback to load states from API
-async function getStatesFromAPI() {
-    // Using Natural Earth API as example
-    try {
-        const response = await fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world_population.csv');
-        // Process and return state names
-        return []; // Placeholder
-    } catch (error) {
-        console.error('Failed to load states from API');
-        return [];
-    }
-}
-
-// Load individual state geometry when needed
-async function loadStateGeometry(stateId) {
-    if (statesCache.has(stateId)) {
-        return statesCache.get(stateId);
-    }
-
-    try {
-        // Option 1: Load from individual state files (if you split your big file)
-        const response = await fetch(`states/${stateId}.geojson`);
-        const stateData = await response.json();
-        statesCache.set(stateId, stateData.features[0]);
-        return stateData.features[0];
-    } catch (error) {
-        // Option 2: Fallback to API
-        return loadStateFromAPI(stateId);
-    }
-}
-
-async function loadStateFromAPI(stateId) {
-    // Use Overpass API to get specific administrative division
-    const query = `
-        [out:json][timeout:10];
-        relation["ISO3166-1:alpha2"~"${stateId.split('-')[0]}"]["admin_level"="4"];
-        out geom;
-    `;
-    
-    try {
-        const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
-        const data = await response.json();
+        // Add predefined states/provinces (most popular ones)
+        addPredefinedStates();
         
-        if (data.elements && data.elements.length > 0) {
-            // Convert Overpass format to GeoJSON
-            const feature = overpassToGeoJSON(data.elements[0]);
-            statesCache.set(stateId, feature);
-            return feature;
-        }
+        console.log(`Loaded ${searchableData.length} searchable items`);
+        
     } catch (error) {
-        console.error('Failed to load state from API:', error);
+        console.error('Error loading initial data:', error);
+        // Fallback: load everything from APIs
+        await loadFromAPIsOnly();
     }
-    
-    return null;
 }
 
-// Convert Overpass API result to GeoJSON
-function overpassToGeoJSON(element) {
-    // Simplified conversion - you'd need a more robust implementation
-    return {
-        type: 'Feature',
-        properties: {
-            name: element.tags.name || 'Unknown'
-        },
-        geometry: {
-            type: 'Polygon',
-            coordinates: element.geometry || []
-        }
-    };
+// Add popular states/provinces that people commonly search for
+function addPredefinedStates() {
+    const popularStates = [
+        // US States
+        { name: 'California', type: 'US State', country: 'US', adminLevel: 4 },
+        { name: 'Texas', type: 'US State', country: 'US', adminLevel: 4 },
+        { name: 'Florida', type: 'US State', country: 'US', adminLevel: 4 },
+        { name: 'New York', type: 'US State', country: 'US', adminLevel: 4 },
+        { name: 'Alaska', type: 'US State', country: 'US', adminLevel: 4 },
+        
+        // Canadian Provinces
+        { name: 'Ontario', type: 'Province', country: 'CA', adminLevel: 4 },
+        { name: 'Quebec', type: 'Province', country: 'CA', adminLevel: 4 },
+        { name: 'British Columbia', type: 'Province', country: 'CA', adminLevel: 4 },
+        
+        // Australian States
+        { name: 'Queensland', type: 'State', country: 'AU', adminLevel: 4 },
+        { name: 'New South Wales', type: 'State', country: 'AU', adminLevel: 4 },
+        { name: 'Victoria', type: 'State', country: 'AU', adminLevel: 4 },
+        { name: 'Western Australia', type: 'State', country: 'AU', adminLevel: 4 },
+        
+        // Other popular regions
+        { name: 'Bavaria', type: 'State', country: 'DE', adminLevel: 4 },
+        { name: 'Catalonia', type: 'Region', country: 'ES', adminLevel: 4 },
+        { name: 'Tuscany', type: 'Region', country: 'IT', adminLevel: 4 },
+        { name: 'Île-de-France', type: 'Region', country: 'FR', adminLevel: 4 },
+    ];
+
+    popularStates.forEach(state => {
+        searchableData.push({
+            name: state.name,
+            type: state.type,
+            country: state.country,
+            adminLevel: state.adminLevel,
+            loadType: 'api'
+        });
+    });
 }
 
-// Search functionality with async loading
+// Fallback: load from APIs only
+async function loadFromAPIsOnly() {
+    try {
+        // Load countries from Natural Earth API
+        const countriesResponse = await fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world_countries_410m.geojson');
+        const countries = await countriesResponse.json();
+        
+        geojsonLayers.countries = L.geoJSON(countries, {
+            style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
+        }).addTo(map);
+
+        countries.features.forEach(feature => {
+            searchableData.push({
+                name: feature.properties.NAME,
+                type: 'Country',
+                geojsonFeature: feature,
+                loadType: 'immediate'
+            });
+        });
+
+        addPredefinedStates();
+        console.log('Loaded data from APIs successfully');
+        
+    } catch (error) {
+        console.error('Failed to load from APIs:', error);
+    }
+}
+
+// Search functionality
 searchBox.addEventListener('input', (e) => {
     const query = e.target.value.toLowerCase();
     searchResults.innerHTML = '';
@@ -140,6 +128,15 @@ searchBox.addEventListener('input', (e) => {
     const results = searchableData
         .filter(item => item.name.toLowerCase().includes(query))
         .slice(0, 10);
+
+    if (results.length === 0) {
+        const div = document.createElement('div');
+        div.textContent = 'No results found';
+        div.style.fontStyle = 'italic';
+        div.style.color = '#666';
+        searchResults.appendChild(div);
+        return;
+    }
 
     results.forEach(item => {
         const div = document.createElement('div');
@@ -158,18 +155,158 @@ async function handleSelection(item) {
     
     if (item.loadType === 'immediate') {
         feature = item.geojsonFeature;
-    } else if (item.loadType === 'ondemand') {
+        createDraggableClone(feature);
+    } else if (item.loadType === 'api') {
         // Show loading indicator
-        searchResults.innerHTML = '<div>Loading...</div>';
-        feature = await loadStateGeometry(item.stateId);
+        const loadingDiv = document.createElement('div');
+        loadingDiv.textContent = 'Loading...';
+        loadingDiv.style.fontStyle = 'italic';
+        searchResults.innerHTML = '';
+        searchResults.appendChild(loadingDiv);
+        
+        feature = await loadFromOverpassAPI(item);
+        searchResults.innerHTML = '';
         
         if (!feature) {
-            searchResults.innerHTML = '<div>Failed to load geometry</div>';
+            const errorDiv = document.createElement('div');
+            errorDiv.textContent = 'Failed to load. Try a different search.';
+            errorDiv.style.color = 'red';
+            searchResults.appendChild(errorDiv);
             return;
         }
+        
+        createDraggableClone(feature);
+    }
+}
+
+// Load state/province from Overpass API
+async function loadFromOverpassAPI(item) {
+    const cacheKey = `${item.country}-${item.name}`;
+    
+    if (statesCache.has(cacheKey)) {
+        return statesCache.get(cacheKey);
+    }
+
+    try {
+        // Build Overpass query for administrative boundaries
+        const query = `
+            [out:json][timeout:15];
+            (
+              relation["name"~"${item.name}"]["admin_level"="${item.adminLevel}"]["boundary"="administrative"];
+            );
+            out geom;
+        `;
+
+        const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.elements && data.elements.length > 0) {
+            // Find the best match
+            let bestMatch = data.elements[0];
+            
+            // Try to find exact name match
+            for (let element of data.elements) {
+                if (element.tags && element.tags.name && 
+                    element.tags.name.toLowerCase() === item.name.toLowerCase()) {
+                    bestMatch = element;
+                    break;
+                }
+            }
+            
+            const feature = await overpassToGeoJSON(bestMatch);
+            if (feature) {
+                statesCache.set(cacheKey, feature);
+                return feature;
+            }
+        }
+    } catch (error) {
+        console.error('Overpass API error:', error);
     }
     
-    createDraggableClone(feature);
+    // Fallback: try Nominatim for simpler geometry
+    return await loadFromNominatim(item);
+}
+
+// Fallback: load from Nominatim API
+async function loadFromNominatim(item) {
+    try {
+        const query = `${item.name}, ${getCountryName(item.country)}`;
+        const response = await fetch(
+            `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=geojson&polygon_geojson=1&limit=1`
+        );
+        
+        const data = await response.json();
+        
+        if (data.features && data.features.length > 0) {
+            return data.features[0];
+        }
+    } catch (error) {
+        console.error('Nominatim API error:', error);
+    }
+    
+    return null;
+}
+
+// Convert Overpass result to GeoJSON
+async function overpassToGeoJSON(element) {
+    if (!element.members || !element.tags) {
+        return null;
+    }
+
+    try {
+        // This is a simplified conversion
+        // For production, you'd want a more robust OSM to GeoJSON converter
+        const coordinates = [];
+        
+        if (element.members) {
+            // Process outer ways
+            const outerWays = element.members.filter(m => m.role === 'outer');
+            
+            if (outerWays.length > 0 && outerWays[0].geometry) {
+                const coords = outerWays[0].geometry.map(node => [node.lon, node.lat]);
+                coordinates.push(coords);
+            }
+        }
+
+        if (coordinates.length === 0) {
+            return null;
+        }
+
+        return {
+            type: 'Feature',
+            properties: {
+                name: element.tags.name || 'Unknown',
+                admin_level: element.tags.admin_level
+            },
+            geometry: {
+                type: 'Polygon',
+                coordinates: coordinates
+            }
+        };
+    } catch (error) {
+        console.error('Error converting Overpass data:', error);
+        return null;
+    }
+}
+
+// Helper to get country name from code
+function getCountryName(code) {
+    const countries = {
+        'US': 'United States',
+        'CA': 'Canada',
+        'AU': 'Australia',
+        'DE': 'Germany',
+        'ES': 'Spain',
+        'IT': 'Italy',
+        'FR': 'France',
+        'GB': 'United Kingdom'
+    };
+    return countries[code] || code;
 }
 
 // --- 3. CORE FUNCTIONALITY: CREATE A DRAGGABLE, COLOURED, RESIZING CLONE ---
