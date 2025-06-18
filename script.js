@@ -22,7 +22,7 @@ Promise.all([
     // Process countries
     geojsonLayers.countries = L.geoJSON(countries, {
         style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
-    })
+    }).addTo(map);
 
     countries.features.forEach(feature => {
         searchableData.push({
@@ -68,9 +68,6 @@ searchBox.addEventListener('input', (e) => {
     });
 });
 
-
-// ----------------- REPLACE THE ENTIRE OLD FUNCTION WITH THIS NEW ONE -----------------
-
 // --- 3. CORE FUNCTIONALITY: CREATE A DRAGGABLE, COLOURED, RESIZING CLONE ---
 function createDraggableClone(geojsonFeature) {
     const style = {
@@ -78,77 +75,144 @@ function createDraggableClone(geojsonFeature) {
         weight: 2,
         fillColor: palette[colorIndex % palette.length],
         fillOpacity: 0.5,
-        interactive: true // Ensure the layer is clickable
+        interactive: true
     };
     colorIndex++;
 
-    const clone = L.geoJSON(geojsonFeature, { style: style }).addTo(map);
-
-    // Get the actual polygon layer from the GeoJSON group
-    const layerToDrag = clone.getLayers()[0];
-
-    // Enable dragging on the specific polygon layer
-    layerToDrag.dragging = new L.Draggable(layerToDrag._path);
-    layerToDrag.dragging.enable();
-
-    // Store the starting point on drag start
-    let startPoint;
-    layerToDrag.dragging.on('dragstart', function() {
-        startPoint = this._map.latLngToLayerPoint(layerToDrag.getBounds().getCenter());
-    });
-
-    // On every drag event, move the polygon and then rescale it
-    layerToDrag.dragging.on('drag', function(e) {
-        const newPoint = this._map.latLngToLayerPoint(layerToDrag.getBounds().getCenter());
-        const offset = newPoint.subtract(startPoint);
-        
-        // This is a complex part: we need to manually update the layer's coordinates
-        const originalLatLngs = L.GeoJSON.coordsToLatLngs(geojsonFeature.geometry.coordinates);
-        let newLatLngs = originalLatLngs.map(ring => {
-            if (Array.isArray(ring[0])) { // Multipolygon
-                return ring.map(innerRing => moveRing(innerRing, offset, this._map));
-            }
-            return moveRing(ring, offset, this._map);
-        });
-
-        layerToDrag.setLatLngs(newLatLngs);
-        startPoint = newPoint; // Update start point for next drag event
-
-        // NOW, call our custom rescale logic
-        const newCenter = layerToDrag.getBounds().getCenter();
-        rescalePolygon(layerToDrag, newLatLngs, newCenter);
-    });
-
-    // Helper function to move the points of a polygon ring
-    function moveRing(latlngs, offset, map) {
-        return latlngs.map(latlng => {
-            const point = map.latLngToLayerPoint(latlng).add(offset);
-            return map.layerPointToLatLng(point);
-        });
-    }
+    const clone = L.geoJSON(geojsonFeature, { 
+        style: style,
+        onEachFeature: function(feature, layer) {
+            makeDraggable(layer, feature);
+        }
+    }).addTo(map);
 
     map.flyToBounds(clone.getBounds(), { maxZoom: 8, duration: 0.5 });
 }
 
-// ----------------- END OF REPLACEMENT -----------------
+// --- 4. MAKE POLYGON DRAGGABLE ---
+function makeDraggable(layer, originalFeature) {
+    let isDragging = false;
+    let dragStartLatLng = null;
+    let originalCoords = null;
 
-// --- 4. THE "TRUE SIZE" RESCALING LOGIC (REMAINS THE SAME) ---
-// ... (The rescalePolygon and rescaleRing functions from the previous code go here) ...
-function rescalePolygon(layer, originalLatLngs, newCenter) {
-    const centerLatRad = newCenter.lat * Math.PI / 180;
-    const scale = 1 / Math.cos(centerLatRad);
-    const scaledLatLngs = originalLatLngs.map(function(ring) {
-        if (Array.isArray(ring[0])) {
-            return ring.map(innerRing => rescaleRing(innerRing, newCenter, scale));
+    // Store original coordinates
+    if (originalFeature.geometry.type === 'Polygon') {
+        originalCoords = originalFeature.geometry.coordinates;
+    } else if (originalFeature.geometry.type === 'MultiPolygon') {
+        originalCoords = originalFeature.geometry.coordinates;
+    }
+
+    layer.on('mousedown', function(e) {
+        isDragging = true;
+        dragStartLatLng = e.latlng;
+        map.dragging.disable();
+        map.off('click');
+        
+        // Change cursor to indicate dragging
+        map.getContainer().style.cursor = 'grabbing';
+        
+        // Prevent default map interactions
+        L.DomEvent.stopPropagation(e);
+    });
+
+    map.on('mousemove', function(e) {
+        if (!isDragging) return;
+        
+        const currentLatLng = e.latlng;
+        const deltaLat = currentLatLng.lat - dragStartLatLng.lat;
+        const deltaLng = currentLatLng.lng - dragStartLatLng.lng;
+        
+        // Calculate new coordinates
+        let newCoords;
+        if (originalFeature.geometry.type === 'Polygon') {
+            newCoords = originalCoords.map(ring => 
+                ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
+            );
+        } else if (originalFeature.geometry.type === 'MultiPolygon') {
+            newCoords = originalCoords.map(polygon =>
+                polygon.map(ring => 
+                    ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
+                )
+            );
         }
-        return rescaleRing(ring, newCenter, scale);
+
+        // Convert coordinates to LatLngs and apply rescaling
+        const newLatLngs = coordsToLatLngs(newCoords, originalFeature.geometry.type);
+        const newCenter = calculateCenter(newLatLngs);
+        const rescaledLatLngs = rescaleCoordinates(newLatLngs, newCenter, originalFeature.geometry.type);
+        
+        // Update the layer
+        layer.setLatLngs(rescaledLatLngs);
     });
-    layer.setLatLngs(scaledLatLngs);
+
+    map.on('mouseup', function() {
+        if (isDragging) {
+            isDragging = false;
+            map.dragging.enable();
+            map.getContainer().style.cursor = '';
+        }
+    });
+
+    // Also handle mouse leave to stop dragging
+    map.on('mouseleave', function() {
+        if (isDragging) {
+            isDragging = false;
+            map.dragging.enable();
+            map.getContainer().style.cursor = '';
+        }
+    });
 }
-function rescaleRing(latlngs, center, scale) {
-     return latlngs.map(function(latlng) {
-        const dLon = latlng.lng - center.lng;
-        const dLat = latlng.lat - center.lat;
-        return L.latLng(center.lat + dLat, center.lng + dLon * scale);
-    });
+
+// --- 5. HELPER FUNCTIONS ---
+function coordsToLatLngs(coords, geometryType) {
+    if (geometryType === 'Polygon') {
+        return coords.map(ring => ring.map(coord => L.latLng(coord[1], coord[0])));
+    } else if (geometryType === 'MultiPolygon') {
+        return coords.map(polygon => 
+            polygon.map(ring => ring.map(coord => L.latLng(coord[1], coord[0])))
+        );
+    }
+}
+
+function calculateCenter(latLngs) {
+    let totalLat = 0, totalLng = 0, count = 0;
+    
+    function processRing(ring) {
+        ring.forEach(latlng => {
+            totalLat += latlng.lat;
+            totalLng += latlng.lng;
+            count++;
+        });
+    }
+    
+    if (Array.isArray(latLngs[0][0])) { // MultiPolygon
+        latLngs.forEach(polygon => {
+            polygon.forEach(ring => processRing(ring));
+        });
+    } else { // Polygon
+        latLngs.forEach(ring => processRing(ring));
+    }
+    
+    return L.latLng(totalLat / count, totalLng / count);
+}
+
+function rescaleCoordinates(latLngs, center, geometryType) {
+    const centerLatRad = center.lat * Math.PI / 180;
+    const scale = 1 / Math.cos(centerLatRad);
+    
+    function rescaleRing(ring) {
+        return ring.map(latlng => {
+            const dLon = latlng.lng - center.lng;
+            const dLat = latlng.lat - center.lat;
+            return L.latLng(center.lat + dLat, center.lng + dLon * scale);
+        });
+    }
+    
+    if (geometryType === 'Polygon') {
+        return latLngs.map(ring => rescaleRing(ring));
+    } else if (geometryType === 'MultiPolygon') {
+        return latLngs.map(polygon => 
+            polygon.map(ring => rescaleRing(ring))
+        );
+    }
 }
