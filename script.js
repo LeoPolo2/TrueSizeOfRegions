@@ -93,15 +93,11 @@ function createDraggableClone(geojsonFeature) {
 function makeDraggable(layer, originalFeature) {
     let isDragging = false;
     let dragStartLatLng = null;
-    let originalCoords = null;
-
-    // Store original coordinates
-    if (originalFeature.geometry.type === 'Polygon') {
-        originalCoords = originalFeature.geometry.coordinates;
-    } else if (originalFeature.geometry.type === 'MultiPolygon') {
-        originalCoords = originalFeature.geometry.coordinates;
-    }
-
+    
+    // Store the original coordinates and center
+    const originalCoords = JSON.parse(JSON.stringify(originalFeature.geometry.coordinates));
+    const originalCenter = calculateCenterFromCoords(originalCoords, originalFeature.geometry.type);
+    
     layer.on('mousedown', function(e) {
         isDragging = true;
         dragStartLatLng = e.latlng;
@@ -122,27 +118,15 @@ function makeDraggable(layer, originalFeature) {
         const deltaLat = currentLatLng.lat - dragStartLatLng.lat;
         const deltaLng = currentLatLng.lng - dragStartLatLng.lng;
         
-        // Calculate new coordinates
-        let newCoords;
-        if (originalFeature.geometry.type === 'Polygon') {
-            newCoords = originalCoords.map(ring => 
-                ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
-            );
-        } else if (originalFeature.geometry.type === 'MultiPolygon') {
-            newCoords = originalCoords.map(polygon =>
-                polygon.map(ring => 
-                    ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
-                )
-            );
-        }
-
-        // Convert coordinates to LatLngs and apply rescaling
-        const newLatLngs = coordsToLatLngs(newCoords, originalFeature.geometry.type);
-        const newCenter = calculateCenter(newLatLngs);
-        const rescaledLatLngs = rescaleCoordinates(newLatLngs, newCenter, originalFeature.geometry.type);
+        // Calculate new center
+        const newCenter = L.latLng(originalCenter.lat + deltaLat, originalCenter.lng + deltaLng);
         
-        // Update the layer
-        layer.setLatLngs(rescaledLatLngs);
+        // Apply the transformation: move first, then rescale
+        const transformedCoords = transformCoordinates(originalCoords, originalCenter, newCenter, originalFeature.geometry.type);
+        
+        // Convert to LatLngs and update layer
+        const newLatLngs = coordsToLatLngs(transformedCoords, originalFeature.geometry.type);
+        layer.setLatLngs(newLatLngs);
     });
 
     map.on('mouseup', function() {
@@ -163,56 +147,101 @@ function makeDraggable(layer, originalFeature) {
     });
 }
 
-// --- 5. HELPER FUNCTIONS ---
+// --- 5. COORDINATE TRANSFORMATION FUNCTIONS ---
+function transformCoordinates(coords, originalCenter, newCenter, geometryType) {
+    // First, translate the coordinates
+    const deltaLat = newCenter.lat - originalCenter.lat;
+    const deltaLng = newCenter.lng - originalCenter.lng;
+    
+    let translatedCoords;
+    if (geometryType === 'Polygon') {
+        translatedCoords = coords.map(ring => 
+            ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
+        );
+    } else if (geometryType === 'MultiPolygon') {
+        translatedCoords = coords.map(polygon =>
+            polygon.map(ring => 
+                ring.map(coord => [coord[0] + deltaLng, coord[1] + deltaLat])
+            )
+        );
+    }
+    
+    // Then apply mercator projection correction
+    return applyMercatorCorrection(translatedCoords, originalCenter, newCenter, geometryType);
+}
+
+function applyMercatorCorrection(coords, originalCenter, newCenter, geometryType) {
+    // Calculate the scaling factor based on latitude change
+    // This corrects for the Mercator projection distortion
+    const originalLat = Math.abs(originalCenter.lat);
+    const newLat = Math.abs(newCenter.lat);
+    
+    // Avoid extreme scaling near poles
+    const clampedOriginalLat = Math.min(Math.max(originalLat, 0.1), 85);
+    const clampedNewLat = Math.min(Math.max(newLat, 0.1), 85);
+    
+    // Calculate scale factor using the secant of latitude (inverse cosine)
+    const originalScale = 1 / Math.cos(clampedOriginalLat * Math.PI / 180);
+    const newScale = 1 / Math.cos(clampedNewLat * Math.PI / 180);
+    const scaleFactor = newScale / originalScale;
+    
+    // Only apply significant scaling to avoid jitter
+    if (Math.abs(scaleFactor - 1) < 0.01) {
+        return coords;
+    }
+    
+    function scaleRing(ring) {
+        return ring.map(coord => {
+            const dLng = coord[0] - newCenter.lng;
+            const dLat = coord[1] - newCenter.lat;
+            
+            return [
+                newCenter.lng + dLng * scaleFactor,
+                newCenter.lat + dLat // Latitude doesn't scale in Mercator
+            ];
+        });
+    }
+    
+    if (geometryType === 'Polygon') {
+        return coords.map(ring => scaleRing(ring));
+    } else if (geometryType === 'MultiPolygon') {
+        return coords.map(polygon => 
+            polygon.map(ring => scaleRing(ring))
+        );
+    }
+    
+    return coords;
+}
+
+// --- 6. HELPER FUNCTIONS ---
+function calculateCenterFromCoords(coords, geometryType) {
+    let totalLat = 0, totalLng = 0, count = 0;
+    
+    function processRing(ring) {
+        ring.forEach(coord => {
+            totalLng += coord[0];
+            totalLat += coord[1];
+            count++;
+        });
+    }
+    
+    if (geometryType === 'Polygon') {
+        coords.forEach(ring => processRing(ring));
+    } else if (geometryType === 'MultiPolygon') {
+        coords.forEach(polygon => {
+            polygon.forEach(ring => processRing(ring));
+        });
+    }
+    
+    return L.latLng(totalLat / count, totalLng / count);
+}
+
 function coordsToLatLngs(coords, geometryType) {
     if (geometryType === 'Polygon') {
         return coords.map(ring => ring.map(coord => L.latLng(coord[1], coord[0])));
     } else if (geometryType === 'MultiPolygon') {
         return coords.map(polygon => 
             polygon.map(ring => ring.map(coord => L.latLng(coord[1], coord[0])))
-        );
-    }
-}
-
-function calculateCenter(latLngs) {
-    let totalLat = 0, totalLng = 0, count = 0;
-    
-    function processRing(ring) {
-        ring.forEach(latlng => {
-            totalLat += latlng.lat;
-            totalLng += latlng.lng;
-            count++;
-        });
-    }
-    
-    if (Array.isArray(latLngs[0][0])) { // MultiPolygon
-        latLngs.forEach(polygon => {
-            polygon.forEach(ring => processRing(ring));
-        });
-    } else { // Polygon
-        latLngs.forEach(ring => processRing(ring));
-    }
-    
-    return L.latLng(totalLat / count, totalLng / count);
-}
-
-function rescaleCoordinates(latLngs, center, geometryType) {
-    const centerLatRad = center.lat * Math.PI / 180;
-    const scale = 1 / Math.cos(centerLatRad);
-    
-    function rescaleRing(ring) {
-        return ring.map(latlng => {
-            const dLon = latlng.lng - center.lng;
-            const dLat = latlng.lat - center.lat;
-            return L.latLng(center.lat + dLat, center.lng + dLon * scale);
-        });
-    }
-    
-    if (geometryType === 'Polygon') {
-        return latLngs.map(ring => rescaleRing(ring));
-    } else if (geometryType === 'MultiPolygon') {
-        return latLngs.map(polygon => 
-            polygon.map(ring => rescaleRing(ring))
         );
     }
 }
