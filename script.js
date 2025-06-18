@@ -69,42 +69,68 @@ searchBox.addEventListener('input', (e) => {
 });
 
 
+// ----------------- REPLACE THE ENTIRE OLD FUNCTION WITH THIS NEW ONE -----------------
+
 // --- 3. CORE FUNCTIONALITY: CREATE A DRAGGABLE, COLOURED, RESIZING CLONE ---
 function createDraggableClone(geojsonFeature) {
-    // Select the next colour from our palette, and loop back to the start if we're at the end
     const style = {
         color: palette[colorIndex % palette.length],
         weight: 2,
         fillColor: palette[colorIndex % palette.length],
-        fillOpacity: 0.5
+        fillOpacity: 0.5,
+        interactive: true // Ensure the layer is clickable
     };
-    colorIndex++; // Increment the index for the next clone
+    colorIndex++;
 
-    // Create the new layer with the new style and enable the transform plugin
-    const clone = L.geoJSON(geojsonFeature, {
-        style: style,
-        transform: true // This is crucial for the plugin to work
-    }).addTo(map);
+    const clone = L.geoJSON(geojsonFeature, { style: style }).addTo(map);
 
-    // IMPORTANT: Enable the transformation handles (for dragging, rotating, scaling)
-    clone.transform.enable({ rotation: true, scaling: false });
+    // Get the actual polygon layer from the GeoJSON group
+    const layerToDrag = clone.getLayers()[0];
 
-    // When the clone is being dragged, we must trigger our rescale logic
-    clone.on('drag', (e) => {
-        // We need to get the layer that is actually being transformed
-        const transformedLayer = e.target.getLayers()[0];
-        const newCenter = transformedLayer.getBounds().getCenter();
+    // Enable dragging on the specific polygon layer
+    layerToDrag.dragging = new L.Draggable(layerToDrag._path);
+    layerToDrag.dragging.enable();
 
-        // Get the original coordinates from the feature data to prevent cumulative errors
-        const originalLatLngs = L.GeoJSON.coordsToLatLngs(geojsonFeature.geometry.coordinates);
-
-        // Call the rescale function to apply the "true size" effect
-        rescalePolygon(transformedLayer, originalLatLngs, newCenter);
+    // Store the starting point on drag start
+    let startPoint;
+    layerToDrag.dragging.on('dragstart', function() {
+        startPoint = this._map.latLngToLayerPoint(layerToDrag.getBounds().getCenter());
     });
 
-    // Fly the map view to the newly created polygon
+    // On every drag event, move the polygon and then rescale it
+    layerToDrag.dragging.on('drag', function(e) {
+        const newPoint = this._map.latLngToLayerPoint(layerToDrag.getBounds().getCenter());
+        const offset = newPoint.subtract(startPoint);
+        
+        // This is a complex part: we need to manually update the layer's coordinates
+        const originalLatLngs = L.GeoJSON.coordsToLatLngs(geojsonFeature.geometry.coordinates);
+        let newLatLngs = originalLatLngs.map(ring => {
+            if (Array.isArray(ring[0])) { // Multipolygon
+                return ring.map(innerRing => moveRing(innerRing, offset, this._map));
+            }
+            return moveRing(ring, offset, this._map);
+        });
+
+        layerToDrag.setLatLngs(newLatLngs);
+        startPoint = newPoint; // Update start point for next drag event
+
+        // NOW, call our custom rescale logic
+        const newCenter = layerToDrag.getBounds().getCenter();
+        rescalePolygon(layerToDrag, newLatLngs, newCenter);
+    });
+
+    // Helper function to move the points of a polygon ring
+    function moveRing(latlngs, offset, map) {
+        return latlngs.map(latlng => {
+            const point = map.latLngToLayerPoint(latlng).add(offset);
+            return map.layerPointToLatLng(point);
+        });
+    }
+
     map.flyToBounds(clone.getBounds(), { maxZoom: 8, duration: 0.5 });
 }
+
+// ----------------- END OF REPLACEMENT -----------------
 
 // --- 4. THE "TRUE SIZE" RESCALING LOGIC (REMAINS THE SAME) ---
 // ... (The rescalePolygon and rescaleRing functions from the previous code go here) ...
