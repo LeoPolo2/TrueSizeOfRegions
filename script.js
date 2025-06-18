@@ -13,12 +13,14 @@ const searchBox = document.getElementById('search-box');
 const searchResults = document.getElementById('search-results');
 let searchableData = []; // This will hold { name, type, geojsonFeature }
 let geojsonLayers = {}; // To store the rendered layers
+let statesCache = new Map(); // Cache for loaded states
+let statesIndex = []; // Lightweight index of all states
 
-// Load both countries and states
+// Load countries immediately, states on demand
 Promise.all([
     fetch('countries.geojson').then(res => res.json()),
-    fetch('states.geojson').then(res => res.json())
-]).then(([countries, states]) => {
+    loadStatesIndex() // Load just the index, not the full geometries
+]).then(([countries, statesIdx]) => {
     // Process countries
     geojsonLayers.countries = L.geoJSON(countries, {
         style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
@@ -28,25 +30,108 @@ Promise.all([
         searchableData.push({
             name: feature.properties.ADMIN,
             type: 'Country',
-            geojsonFeature: feature
+            geojsonFeature: feature,
+            loadType: 'immediate'
         });
     });
 
-    // Process states
-    geojsonLayers.states = L.geoJSON(states, {
-        style: { color: "#777", weight: 0.5, fillColor: "#ddd", fillOpacity: 0.7 }
-    }); // Not added to map by default to avoid clutter
-
-    states.features.forEach(feature => {
+    // Add states to searchable data (but don't load geometries yet)
+    statesIndex = statesIdx;
+    statesIdx.forEach(stateInfo => {
         searchableData.push({
-            name: feature.properties.name,
+            name: stateInfo.name,
             type: 'State',
-            geojsonFeature: feature
+            stateId: stateInfo.id,
+            loadType: 'ondemand'
         });
     });
 });
 
-// Search functionality
+// Create a lightweight states index (you'd generate this once from your big file)
+async function loadStatesIndex() {
+    // This would be a small JSON file with just names and IDs
+    // Example structure: [{ id: "US-CA", name: "California" }, ...]
+    try {
+        const response = await fetch('states_index.json');
+        return response.json();
+    } catch (error) {
+        console.log('States index not found, using API fallback');
+        return getStatesFromAPI();
+    }
+}
+
+// Fallback to load states from API
+async function getStatesFromAPI() {
+    // Using Natural Earth API as example
+    try {
+        const response = await fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world_population.csv');
+        // Process and return state names
+        return []; // Placeholder
+    } catch (error) {
+        console.error('Failed to load states from API');
+        return [];
+    }
+}
+
+// Load individual state geometry when needed
+async function loadStateGeometry(stateId) {
+    if (statesCache.has(stateId)) {
+        return statesCache.get(stateId);
+    }
+
+    try {
+        // Option 1: Load from individual state files (if you split your big file)
+        const response = await fetch(`states/${stateId}.geojson`);
+        const stateData = await response.json();
+        statesCache.set(stateId, stateData.features[0]);
+        return stateData.features[0];
+    } catch (error) {
+        // Option 2: Fallback to API
+        return loadStateFromAPI(stateId);
+    }
+}
+
+async function loadStateFromAPI(stateId) {
+    // Use Overpass API to get specific administrative division
+    const query = `
+        [out:json][timeout:10];
+        relation["ISO3166-1:alpha2"~"${stateId.split('-')[0]}"]["admin_level"="4"];
+        out geom;
+    `;
+    
+    try {
+        const response = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (data.elements && data.elements.length > 0) {
+            // Convert Overpass format to GeoJSON
+            const feature = overpassToGeoJSON(data.elements[0]);
+            statesCache.set(stateId, feature);
+            return feature;
+        }
+    } catch (error) {
+        console.error('Failed to load state from API:', error);
+    }
+    
+    return null;
+}
+
+// Convert Overpass API result to GeoJSON
+function overpassToGeoJSON(element) {
+    // Simplified conversion - you'd need a more robust implementation
+    return {
+        type: 'Feature',
+        properties: {
+            name: element.tags.name || 'Unknown'
+        },
+        geometry: {
+            type: 'Polygon',
+            coordinates: element.geometry || []
+        }
+    };
+}
+
+// Search functionality with async loading
 searchBox.addEventListener('input', (e) => {
     const query = e.target.value.toLowerCase();
     searchResults.innerHTML = '';
@@ -54,19 +139,38 @@ searchBox.addEventListener('input', (e) => {
 
     const results = searchableData
         .filter(item => item.name.toLowerCase().includes(query))
-        .slice(0, 10); // Limit to top 10 results
+        .slice(0, 10);
 
     results.forEach(item => {
         const div = document.createElement('div');
         div.textContent = `${item.name} (${item.type})`;
-        div.onclick = () => {
-            createDraggableClone(item.geojsonFeature);
+        div.onclick = async () => {
+            await handleSelection(item);
             searchBox.value = '';
             searchResults.innerHTML = '';
         };
         searchResults.appendChild(div);
     });
 });
+
+async function handleSelection(item) {
+    let feature;
+    
+    if (item.loadType === 'immediate') {
+        feature = item.geojsonFeature;
+    } else if (item.loadType === 'ondemand') {
+        // Show loading indicator
+        searchResults.innerHTML = '<div>Loading...</div>';
+        feature = await loadStateGeometry(item.stateId);
+        
+        if (!feature) {
+            searchResults.innerHTML = '<div>Failed to load geometry</div>';
+            return;
+        }
+    }
+    
+    createDraggableClone(feature);
+}
 
 // --- 3. CORE FUNCTIONALITY: CREATE A DRAGGABLE, COLOURED, RESIZING CLONE ---
 function createDraggableClone(geojsonFeature) {
@@ -94,7 +198,6 @@ function makeDraggable(layer, originalFeature) {
     let isDragging = false;
     let dragStartLatLng = null;
     
-    // Store the original coordinates and center
     const originalCoords = JSON.parse(JSON.stringify(originalFeature.geometry.coordinates));
     const originalCenter = calculateCenterFromCoords(originalCoords, originalFeature.geometry.type);
     
@@ -103,11 +206,7 @@ function makeDraggable(layer, originalFeature) {
         dragStartLatLng = e.latlng;
         map.dragging.disable();
         map.off('click');
-        
-        // Change cursor to indicate dragging
         map.getContainer().style.cursor = 'grabbing';
-        
-        // Prevent default map interactions
         L.DomEvent.stopPropagation(e);
     });
 
@@ -118,13 +217,8 @@ function makeDraggable(layer, originalFeature) {
         const deltaLat = currentLatLng.lat - dragStartLatLng.lat;
         const deltaLng = currentLatLng.lng - dragStartLatLng.lng;
         
-        // Calculate new center
         const newCenter = L.latLng(originalCenter.lat + deltaLat, originalCenter.lng + deltaLng);
-        
-        // Apply the transformation: move first, then rescale
         const transformedCoords = transformCoordinates(originalCoords, originalCenter, newCenter, originalFeature.geometry.type);
-        
-        // Convert to LatLngs and update layer
         const newLatLngs = coordsToLatLngs(transformedCoords, originalFeature.geometry.type);
         layer.setLatLngs(newLatLngs);
     });
@@ -137,7 +231,6 @@ function makeDraggable(layer, originalFeature) {
         }
     });
 
-    // Also handle mouse leave to stop dragging
     map.on('mouseleave', function() {
         if (isDragging) {
             isDragging = false;
@@ -149,7 +242,6 @@ function makeDraggable(layer, originalFeature) {
 
 // --- 5. COORDINATE TRANSFORMATION FUNCTIONS ---
 function transformCoordinates(coords, originalCenter, newCenter, geometryType) {
-    // First, translate the coordinates
     const deltaLat = newCenter.lat - originalCenter.lat;
     const deltaLng = newCenter.lng - originalCenter.lng;
     
@@ -166,26 +258,20 @@ function transformCoordinates(coords, originalCenter, newCenter, geometryType) {
         );
     }
     
-    // Then apply mercator projection correction
     return applyMercatorCorrection(translatedCoords, originalCenter, newCenter, geometryType);
 }
 
 function applyMercatorCorrection(coords, originalCenter, newCenter, geometryType) {
-    // Calculate the scaling factor based on latitude change
-    // This corrects for the Mercator projection distortion
     const originalLat = Math.abs(originalCenter.lat);
     const newLat = Math.abs(newCenter.lat);
     
-    // Avoid extreme scaling near poles
     const clampedOriginalLat = Math.min(Math.max(originalLat, 0.1), 85);
     const clampedNewLat = Math.min(Math.max(newLat, 0.1), 85);
     
-    // Calculate scale factor using the secant of latitude (inverse cosine)
     const originalScale = 1 / Math.cos(clampedOriginalLat * Math.PI / 180);
     const newScale = 1 / Math.cos(clampedNewLat * Math.PI / 180);
     const scaleFactor = newScale / originalScale;
     
-    // Only apply significant scaling to avoid jitter
     if (Math.abs(scaleFactor - 1) < 0.01) {
         return coords;
     }
@@ -197,7 +283,7 @@ function applyMercatorCorrection(coords, originalCenter, newCenter, geometryType
             
             return [
                 newCenter.lng + dLng * scaleFactor,
-                newCenter.lat + dLat // Latitude doesn't scale in Mercator
+                newCenter.lat + dLat
             ];
         });
     }
