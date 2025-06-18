@@ -29,7 +29,7 @@ async function loadInitialData() {
         // Process countries
         geojsonLayers.countries = L.geoJSON(countries, {
             style: { color: "#333", weight: 1, fillColor: "#ccc", fillOpacity: 0.7 }
-        }).addTo(map);
+        })
 
         countries.features.forEach(feature => {
             searchableData.push({
